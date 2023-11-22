@@ -1,6 +1,7 @@
 /**
  * File System Implementation
  * root directory starts at the first block of the data block region
+ * the inode table, root directory and free byte map are brought into memory when first initialized
  */
 #include <signal.h>
 #include <stdbool.h>
@@ -117,12 +118,17 @@ void mksfs(int fresh) {
     buffer = (char *)&root_dir;
     write_blocks(DATA_BLOCK_START, 1, buffer);
 
+    // initialize the root directory array
+    for (int i = 0; i < MAX_FILE_NO; i++) {
+      root_dir[i].used = false;
+    }
+
   } else {
     init_disk("sfs", BLOCK_SIZE, MAX_BLOCK);
     // read superblock from disk to memory and store it in superblock
     char *buffer = (char *)&superblock;
     read_blocks(0, 1, buffer);
-
+    int root_inode = superblock.root_inode;
     // read free byte map from disk to memory and store it in FBM
     buffer = (char *)&FBM;
     // free byte map blocks are located at the end of the disk
@@ -132,19 +138,13 @@ void mksfs(int fresh) {
     buffer = (char *)&inode_table;
     read_blocks(1, INODE_TABLE_SIZE, buffer);
 
-    // read the superblock that is already in memory and find the root inode
-    // number
-    int root_inode = superblock.root_inode;
-
     // find the root directory inode in the inode table
     Inode root_dir_inode = inode_table[root_inode];
 
     // use it's size to determine how many blocks it occupies
     int root_dir_blocks = find_no_file_blocks(root_dir_inode.size);
 
-    // read the number of root directory blocks from disk to memory
-    // the root directory blocks is not contiguous in disk, so we need to loop
-    // through root inode
+    // read the root directory from disk to memory and store it in root_dir
     char root_dir_buffer[root_dir_blocks * BLOCK_SIZE];
     if (root_dir_blocks <= 12) {
       for (int i = 0; i < root_dir_blocks; i++) {
@@ -189,7 +189,7 @@ int sfs_fopen(char *name) {
   // check if the file already exists by searching the root directory
   int file_inode_num = -1;
   for (int i = 0; i < MAX_FILE_NO; i++) {
-    if (strcmp(root_dir[i].file_name, name) == 0 ) {
+    if (root_dir[i].used && strcmp(root_dir[i].file_name, name) == 0) {
       // the file already exists
       file_inode_num = root_dir[i].inode_num;
       break;
@@ -209,7 +209,7 @@ int sfs_fopen(char *name) {
         break;
       }
     }
-    // if there is no available entry in the file descriptor table, return -1
+
     if (fdt_index == -1) {
       return -1;
     }
@@ -221,36 +221,107 @@ int sfs_fopen(char *name) {
   }
 
   // if the file does not exist, create a new file
+  // find the file descriptor table entry that is not in use
+  int fdt_index = -1;
+  for (int i = 0; i < MAX_FILE_NO; i++) {
+    if (FDT[i].inode_num == -1) {
+      fdt_index = i;
+      break;
+    }
+  }
+
+  if (fdt_index == -1) {
+    return -1;
+  }
+  // find the first available inode in the inode table
+  int file_inode_num = -1;
+  for (int i = 0; i < MAX_FILE_NO; i++) {
+    if (inode_table[i].size == -1) {
+      file_inode_num = i;
+      break;
+    }
+  }
+
+  if (file_inode_num == -1) {
+    return -1;
+  }
+  // set the file descriptor table entry
+  FDT[fdt_index].inode_num = file_inode_num;
+  FDT[fdt_index].offset = 0;
+  // set the inode table entry
+  inode_table[file_inode_num].size = 0;
+  inode_table[file_inode_num].direct[0] = find_available_block();
+  // set the root directory entry by finding the first available entry
+  int root_dir_index = -1;
+  for (int i = 0; i < MAX_FILE_NO; i++) {
+    if (!root_dir[i].used) {
+      root_dir_index = i;
+      break;
+    }
+  }
+  // if there is no available entry in the root directory, return -1
+  if (root_dir_index == -1) {
+    return -1;
+  }
+  // set the root directory entry
+  root_dir[root_dir_index].inode_num = file_inode_num;
+  strcpy(root_dir[root_dir_index].file_name, name);
+  root_dir[root_dir_index].used = 1;
+  // return the index of the file descriptor table entry
+  return fdt_index;
+
 }
 
-int sfs_fclose(int);
+/*The sfs_fclose() closes a file, i.e., removes the entry (used = 0) from the file descriptor table (note that the file remains on disk – it is just the association between the process and the file is terminated). On success, sfs_fclose() should return 0 and a negative value otherwise.*/
+int sfs_fclose(int fileID) {
+  // check if the file descriptor table entry is in use
+  if (FDT[fileID].inode_num == -1) {
+    return -1;
+  }
+  // set the file descriptor table entry
+  FDT[fileID].inode_num = -1;
+  FDT[fileID].offset = 0;
+  // return 0 on success
+  return 0;
+}
 
 int sfs_fwrite(int, const char *, int);
 
 int sfs_fread(int, char *, int);
 
-int sfs_fseek(int, int);
+/*The sfs_fseek() moves the read/write pointer (a single pointer in SFS) to the given location. It returns 0 on success and a negative integer value otherwise. No disk operation*/
+int sfs_fseek(int fileID, int loc) {
+  // check if the file descriptor table entry is in use
+  if (FDT[fileID].inode_num == -1) {
+    return -1;
+  }
+  // check if the location is valid
+  if (loc < 0 || loc > inode_table[FDT[fileID].inode_num].size) {
+    return -1;
+  }
+  // set the file descriptor table entry
+  FDT[fileID].offset = loc;
+  // return 0 on success
+  return 0;
+}
 
-int sfs_remove(char *);
+/* The sfs_remove() removes the file from the directory entry, releases the i-Node and releases the data blocks used by the file (i.e., the data blocks are added to the free block list/map), so that they can be used by new files in the future.*/
+int sfs_remove( ){
 
-// int main(int argc, char const *argv[]) {
-//   // char byte_array[sizeof(int)];
+}
 
-//   // int i = 2353;
-//   // memcpy(byte_array, &i, sizeof(int));
 
-//   // // convert the byte array to original int
-//   // int j;
-//   // memcpy(&j, byte_array, sizeof(int));
-//   // printf("%d\n", j);
+// the following is for testing and usage of the functions
 
-//   // int i = 2536;
-//   // void *buffer = &i;
-//   // char *byte_array = (char *) buffer;
-
-//   // int *abc = (int *) byte_array;
-//   // printf("%d\n", *abc);
-
-//   // // print the size of inode
-//   // printf("Size of inode: %lu\n", sizeof(Inode));
+// int main() {
+//   mksfs(1);
+//   int f = sfs_fopen("some_name.txt");
+//   char my_data[] = "The quick brown fox jumps over the lazy dog";
+//   char out_data[1024];
+//   sfs_fwrite(f, my_data, sizeof(my_data) + 1);
+//   sfs_fseek(f, 0);
+//   sfs_fread(f, out_data, sizeof(out_data) + 1);
+//   printf("%s\n", out_data);
+//   sfs_fclose(f);
+//   // sfs_remove("some_name.txt");
 // }
