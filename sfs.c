@@ -1,7 +1,9 @@
 /**
+ * Author: Xu Chen
  * File System Implementation
  * root directory starts at the first block of the data block region
- * the inode table, root directory and free byte map are brought into memory when first initialized
+ * the inode table, root directory and free byte map are brought into memory
+ * when first initialized
  */
 #include <signal.h>
 #include <stdbool.h>
@@ -54,7 +56,7 @@ Inode inode_table[MAX_FILE_NO] = {0};
 int FBM[MAX_BLOCK] = {0};
 DirectoryEntry root_dir[MAX_FILE_NO] = {0};
 
-int find_free_block() {
+int allocate_free_block() {
   for (int i = 0; i < MAX_BLOCK; i++) {
     if (FBM[i] == 0) {
       FBM[i] = 1;
@@ -70,6 +72,15 @@ int find_no_file_blocks(int size) {
     no_blocks++;
   }
   return no_blocks;
+}
+
+void fill_last_block(int block_num, char *write_buffer, int offset,
+                     int remaining, char *writing_contents) {
+  char *buffer = (char *)malloc(BLOCK_SIZE);
+  read_blocks(block_num, 1, buffer);
+  memcpy(write_buffer, buffer, offset);
+  memcpy(write_buffer + offset, writing_contents, remaining);
+  free(buffer);
 }
 
 void mksfs(int fresh) {
@@ -250,7 +261,7 @@ int sfs_fopen(char *name) {
   FDT[fdt_index].offset = 0;
   // set the inode table entry
   inode_table[file_inode_num].size = 0;
-  inode_table[file_inode_num].direct[0] = find_available_block();
+  inode_table[file_inode_num].direct[0] = allocate_free_block();
   // set the root directory entry by finding the first available entry
   int root_dir_index = -1;
   for (int i = 0; i < MAX_FILE_NO; i++) {
@@ -269,10 +280,12 @@ int sfs_fopen(char *name) {
   root_dir[root_dir_index].used = 1;
   // return the index of the file descriptor table entry
   return fdt_index;
-
 }
 
-/*The sfs_fclose() closes a file, i.e., removes the entry (used = 0) from the file descriptor table (note that the file remains on disk – it is just the association between the process and the file is terminated). On success, sfs_fclose() should return 0 and a negative value otherwise.*/
+/*The sfs_fclose() closes a file, i.e., removes the entry (used = 0) from the
+ * file descriptor table (note that the file remains on disk – it is just the
+ * association between the process and the file is terminated). On success,
+ * sfs_fclose() should return 0 and a negative value otherwise.*/
 int sfs_fclose(int fileID) {
   // check if the file descriptor table entry is in use
   if (FDT[fileID].inode_num == -1) {
@@ -284,12 +297,92 @@ int sfs_fclose(int fileID) {
   // return 0 on success
   return 0;
 }
+/*The sfs_fwrite() writes the given number of bytes of data in buf into the open
+ * file, starting from the current file pointer. This in effect could increase
+ * the size of the file by at most the given number of bytes (it may not
+ * increase the file size by the number of bytes written if the write pointer is
+ * located at a location other than the end of the file). The sfs_fwrite()
+ * should return the number of bytes written.*/
+int sfs_fwrite(int fileID, char *buf, int length) {
+  /*
+  1. Allocate disk blocks (mark them as allocated in your free block list).
+  2. Modify the file's i-Node to point to these blocks.
+  3. Write the data the user gives to these blocks.
+  4. Flush all modifications to disk.
+  5. Write should work on old file or new file. You can have partially full last
+  block. Read it first and then fill up date in that before creating new block.
+  */
 
-int sfs_fwrite(int, const char *, int);
+  // check if the file descriptor table entry is in use
+  if (FDT[fileID].inode_num == -1) {
+    return -1;
+  }
+
+  // find the file inode in the inode table
+  Inode file_inode = inode_table[FDT[fileID].inode_num];
+
+  // Calculate the current starting block and offset within the block
+  int starting_pointer_number = FDT[fileID].offset / BLOCK_SIZE;
+  int current_offset = FDT[fileID].offset % BLOCK_SIZE;
+
+  // find remaining space in the current block
+  int remaining_space = BLOCK_SIZE - current_offset;
+
+  // find the number of blocks needed to write the data
+  int data_blocks = find_no_file_blocks(length);
+
+  int bytes_written = 0;
+  char *current_buffer = buf;
+  char write_buffer[length];
+
+  if (remaining_space > 0 && length > remaining_space) {
+    if (starting_pointer_number < 12) {
+      int starting_block = file_inode.direct[starting_pointer_number];
+      if (starting_block == -1) {
+        printf("file not allocated, you need to open it first\n");
+        return -1;
+      }
+      // fill the remaining space in the current block
+      fill_last_block(starting_block, write_buffer, current_offset,
+                      current_buffer, remaining_space);
+    } else {
+      // indirect pointer
+      int indirect_block = file_inode.indirect;
+      if (indirect_block == -1) {
+        printf("allocation error\n");
+        return -1;
+      }
+      char read_buffer[BLOCK_SIZE];
+      // read the indirect block
+      read_blocks(indirect_block, 1, read_buffer);
+      int index_block[BLOCK_SIZE / sizeof(int)];
+      memcpy(index_block, read_buffer, BLOCK_SIZE);
+      int starting_block = index_block[starting_pointer_number - 12];
+
+      // fill the remaining space in the current block
+      fill_last_block(starting_block, write_buffer, current_offset,
+                      current_buffer, remaining_space);
+    }
+  }
+
+  /*
+  now we have filled the remaining space in the current block
+  Assumption: we can write a maximum of 1 block to the disk at a time
+  if the length is greater than the remaining space
+  two cases:
+  1. we are in the direct pointer
+    allocate the new blocks we need and if we exceed the 12 direct pointers, we need to allocate the indirect pointer
+  2. we are in the indirect pointer
+    allocate the new blocks we need
+
+  */
+}
 
 int sfs_fread(int, char *, int);
 
-/*The sfs_fseek() moves the read/write pointer (a single pointer in SFS) to the given location. It returns 0 on success and a negative integer value otherwise. No disk operation*/
+/*The sfs_fseek() moves the read/write pointer (a single pointer in SFS) to the
+ * given location. It returns 0 on success and a negative integer value
+ * otherwise. No disk operation*/
 int sfs_fseek(int fileID, int loc) {
   // check if the file descriptor table entry is in use
   if (FDT[fileID].inode_num == -1) {
@@ -305,11 +398,11 @@ int sfs_fseek(int fileID, int loc) {
   return 0;
 }
 
-/* The sfs_remove() removes the file from the directory entry, releases the i-Node and releases the data blocks used by the file (i.e., the data blocks are added to the free block list/map), so that they can be used by new files in the future.*/
-int sfs_remove( ){
-
-}
-
+/* The sfs_remove() removes the file from the directory entry, releases the
+ * i-Node and releases the data blocks used by the file (i.e., the data blocks
+ * are added to the free block list/map), so that they can be used by new files
+ * in the future.*/
+int sfs_remove() {}
 
 // the following is for testing and usage of the functions
 
