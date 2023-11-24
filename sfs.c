@@ -113,6 +113,15 @@ void mksfs(int fresh) {
     // free byte map blocks are located at the end of the disk
     write_blocks(MAX_BLOCK - NO_FBM_BLOCKS, NO_FBM_BLOCKS, buffer);
 
+    // initialize inode table
+    for (int i = 0; i < MAX_FILE_NO; i++) {
+      inode_table[i].size = -1;
+      for (int j = 0; j < 12; j++) {
+        inode_table[i].direct[j] = -1;
+      }
+      inode_table[i].indirect = -1;
+    }
+
     // initialize inode table for root directory
     inode_table[0].size = 0;
     for (int i = 0; i < 12; i++) {
@@ -135,7 +144,7 @@ void mksfs(int fresh) {
     }
 
   } else {
-    init_disk("sfs", BLOCK_SIZE, MAX_BLOCK);
+    init_disk("my_sfs", BLOCK_SIZE, MAX_BLOCK);
     // read superblock from disk to memory and store it in superblock
     char *buffer = (char *)&superblock;
     read_blocks(0, 1, buffer);
@@ -208,10 +217,18 @@ int sfs_fopen(char *name) {
   }
   // if the file exists, open it
   if (file_inode_num != -1) {
+    // check if the file is already open
+    for (int i = 0; i < MAX_FILE_NO; i++) {
+      if (FDT[i].inode_num == file_inode_num) {
+        // the file is already open
+        return i;
+      }
+    }
+
     // find the file inode in the inode table
     Inode file_inode = inode_table[file_inode_num];
     // find the number of blocks the file occupies
-    int file_blocks = find_no_file_blocks(file_inode.size);
+    // int file_blocks = find_no_file_blocks(file_inode.size);
     // find the file descriptor table entry that is not in use
     int fdt_index = -1;
     for (int i = 0; i < MAX_FILE_NO; i++) {
@@ -245,7 +262,7 @@ int sfs_fopen(char *name) {
     return -1;
   }
   // find the first available inode in the inode table
-  int file_inode_num = -1;
+  file_inode_num = -1;
   for (int i = 0; i < MAX_FILE_NO; i++) {
     if (inode_table[i].size == -1) {
       file_inode_num = i;
@@ -297,6 +314,7 @@ int sfs_fclose(int fileID) {
   // return 0 on success
   return 0;
 }
+
 /*The sfs_fwrite() writes the given number of bytes of data in buf into the open
  * file, starting from the current file pointer. This in effect could increase
  * the size of the file by at most the given number of bytes (it may not
@@ -304,81 +322,202 @@ int sfs_fclose(int fileID) {
  * located at a location other than the end of the file). The sfs_fwrite()
  * should return the number of bytes written.*/
 int sfs_fwrite(int fileID, char *buf, int length) {
-  /*
-  1. Allocate disk blocks (mark them as allocated in your free block list).
-  2. Modify the file's i-Node to point to these blocks.
-  3. Write the data the user gives to these blocks.
-  4. Flush all modifications to disk.
-  5. Write should work on old file or new file. You can have partially full last
-  block. Read it first and then fill up date in that before creating new block.
-  */
-
   // check if the file descriptor table entry is in use
   if (FDT[fileID].inode_num == -1) {
     return -1;
   }
 
-  // find the file inode in the inode table
-  Inode file_inode = inode_table[FDT[fileID].inode_num];
+  // Get the file inode from the inode table
+  int file_inode_num = FDT[fileID].inode_num;
+  Inode file_inode = inode_table[file_inode_num];
 
-  // Calculate the current starting block and offset within the block
-  int starting_pointer_number = FDT[fileID].offset / BLOCK_SIZE;
-  int current_offset = FDT[fileID].offset % BLOCK_SIZE;
+  // Calculate the current block and offset within the block
+  int current_block = FDT[fileID].offset / BLOCK_SIZE;
+  int offset_within_block = FDT[fileID].offset % BLOCK_SIZE;
 
-  // find remaining space in the current block
-  int remaining_space = BLOCK_SIZE - current_offset;
+  // Calculate the remaining space in the current block
+  int remaining_space_in_block = BLOCK_SIZE - offset_within_block;
 
-  // find the number of blocks needed to write the data
-  int data_blocks = find_no_file_blocks(length);
-
+  // Initialize variables to keep track of the bytes written and the buffer
+  // pointer
   int bytes_written = 0;
   char *current_buffer = buf;
-  char write_buffer[length];
 
-  if (remaining_space > 0 && length > remaining_space) {
-    if (starting_pointer_number < 12) {
-      int starting_block = file_inode.direct[starting_pointer_number];
-      if (starting_block == -1) {
-        printf("file not allocated, you need to open it first\n");
-        return -1;
+  while (bytes_written < length) {
+    // Check if the current block is within the direct blocks of the inode
+    if (current_block < 12) {
+      // If the current block is not allocated, allocate a new block
+      if (file_inode.direct[current_block] == -1) {
+        file_inode.direct[current_block] = allocate_free_block();
+        if (file_inode.direct[current_block] == -1) {
+          printf("error for direct block allocation\n");
+          return bytes_written;
+        }
       }
-      // fill the remaining space in the current block
-      fill_last_block(starting_block, write_buffer, current_offset,
-                      current_buffer, remaining_space);
+
+      // Calculate the amount of data to write in the current block
+      int write_size = (remaining_space_in_block < length - bytes_written)
+                           ? remaining_space_in_block
+                           : length - bytes_written;
+
+      // Write data to the current block
+      write_blocks(file_inode.direct[current_block], 1,
+                   current_buffer + bytes_written);
+
+      // Update file pointer and counters
+      FDT[fileID].offset += write_size;
+      bytes_written += write_size;
+      current_block++;
+      remaining_space_in_block = BLOCK_SIZE;
+      current_buffer += write_size;
     } else {
-      // indirect pointer
-      int indirect_block = file_inode.indirect;
-      if (indirect_block == -1) {
-        printf("allocation error\n");
-        return -1;
-      }
-      char read_buffer[BLOCK_SIZE];
-      // read the indirect block
-      read_blocks(indirect_block, 1, read_buffer);
-      int index_block[BLOCK_SIZE / sizeof(int)];
-      memcpy(index_block, read_buffer, BLOCK_SIZE);
-      int starting_block = index_block[starting_pointer_number - 12];
+      // If the current block is in the indirect block
+      if (file_inode.indirect == -1) {
+        // If the indirect block is not allocated, allocate a new block
+        file_inode.indirect = allocate_free_block();
+        if (file_inode.indirect == -1) {
+          // Failed to allocate a new block
+          return bytes_written;
+        }
 
-      // fill the remaining space in the current block
-      fill_last_block(starting_block, write_buffer, current_offset,
-                      current_buffer, remaining_space);
+        // Initialize the indirect block with -1 (unallocated)
+        int indirect_block_buffer[BLOCK_SIZE / sizeof(int)];
+        for (int i = 0; i < BLOCK_SIZE / sizeof(int); i++) {
+          indirect_block_buffer[i] = -1;
+        }
+
+        // Write the initialized indirect block to disk
+        write_blocks(file_inode.indirect, 1, (char *)&indirect_block_buffer);
+      }
+
+      // Read the indirect block into memory
+      int indirect_block_buffer[BLOCK_SIZE / sizeof(int)];
+      read_blocks(file_inode.indirect, 1, (char *)&indirect_block_buffer);
+
+      // If the current block in the indirect block is not allocated, allocate a
+      // new block
+      if (indirect_block_buffer[current_block - 12] == -1) {
+        indirect_block_buffer[current_block - 12] = allocate_free_block();
+        if (indirect_block_buffer[current_block - 12] == -1) {
+          printf("error for indirect block allocation\n");
+          return bytes_written;
+        }
+
+        // Write the updated indirect block to disk
+        write_blocks(file_inode.indirect, 1, (char *)&indirect_block_buffer);
+      }
+
+      // Calculate the amount of data to write in the current block
+      int write_size = (remaining_space_in_block < length - bytes_written)
+                           ? remaining_space_in_block
+                           : length - bytes_written;
+
+      // Write data to the current block in the indirect block
+      write_blocks(indirect_block_buffer[current_block - 12], 1,
+                   current_buffer + bytes_written);
+
+      // Update file pointer and counters
+      FDT[fileID].offset += write_size;
+      bytes_written += write_size;
+      current_block++;
+      remaining_space_in_block = BLOCK_SIZE;
+      current_buffer += write_size;
     }
   }
 
-  /*
-  now we have filled the remaining space in the current block
-  Assumption: we can write a maximum of 1 block to the disk at a time
-  if the length is greater than the remaining space
-  two cases:
-  1. we are in the direct pointer
-    allocate the new blocks we need and if we exceed the 12 direct pointers, we need to allocate the indirect pointer
-  2. we are in the indirect pointer
-    allocate the new blocks we need
+  // Update the size of the file in the inode table
+  if (FDT[fileID].offset > file_inode.size) {
+    file_inode.size = FDT[fileID].offset;
+    inode_table[file_inode_num] = file_inode;
+  }
 
-  */
+  // Write the updated inode table and free byte map to disk
+  char *buffer = (char *)&inode_table;
+  write_blocks(1, INODE_TABLE_SIZE, buffer);
+
+  buffer = (char *)&FBM;
+  write_blocks(MAX_BLOCK - NO_FBM_BLOCKS, NO_FBM_BLOCKS, buffer);
+
+  return bytes_written;
 }
 
-int sfs_fread(int, char *, int);
+int sfs_fread(int fileID, char *buf, int length) {
+  // Check if the file descriptor table entry is in use
+  if (FDT[fileID].inode_num == -1) {
+    return -1;
+  }
+
+  // Get the file inode from the inode table
+  int file_inode_num = FDT[fileID].inode_num;
+  Inode file_inode = inode_table[file_inode_num];
+
+  // Calculate the current block and offset within the block
+  int current_block = FDT[fileID].offset / BLOCK_SIZE;
+  int offset_within_block = FDT[fileID].offset % BLOCK_SIZE;
+
+  // Initialize variables to keep track of the bytes read and the buffer pointer
+  int bytes_read = 0;
+  char *current_buffer = buf;
+
+  while (bytes_read < length) {
+    // Check if the current block is within the direct blocks of the inode
+    if (current_block < 12) {
+      // If the current block is not allocated, break (reached end of file)
+      if (file_inode.direct[current_block] == -1) {
+        break;
+      }
+
+      // Calculate the amount of data to read from the current block
+      int read_size =
+          (file_inode.size - FDT[fileID].offset < length - bytes_read)
+              ? file_inode.size - FDT[fileID].offset
+              : length - bytes_read;
+
+      // Read data from the current block
+      read_blocks(file_inode.direct[current_block], 1,
+                  current_buffer + bytes_read);
+
+      // Update file pointer and counters
+      FDT[fileID].offset += read_size;
+      bytes_read += read_size;
+      current_block++;
+      current_buffer += read_size;
+    } else {
+      // If the current block is in the indirect block
+      if (file_inode.indirect == -1) {
+        break;  // reached end of file
+      }
+
+      // Read the indirect block into memory
+      int indirect_block_buffer[BLOCK_SIZE / sizeof(int)];
+      read_blocks(file_inode.indirect, 1, (char *)&indirect_block_buffer);
+
+      // If the current block in the indirect block is not allocated, break
+      // (reached end of file)
+      if (indirect_block_buffer[current_block - 12] == -1) {
+        break;
+      }
+
+      // Calculate the amount of data to read from the current block
+      int read_size =
+          (file_inode.size - FDT[fileID].offset < length - bytes_read)
+              ? file_inode.size - FDT[fileID].offset
+              : length - bytes_read;
+
+      // Read data from the current block in the indirect block
+      read_blocks(indirect_block_buffer[current_block - 12], 1,
+                  current_buffer + bytes_read);
+
+      // Update file pointer and counters
+      FDT[fileID].offset += read_size;
+      bytes_read += read_size;
+      current_block++;
+      current_buffer += read_size;
+    }
+  }
+
+  return bytes_read;
+}
 
 /*The sfs_fseek() moves the read/write pointer (a single pointer in SFS) to the
  * given location. It returns 0 on success and a negative integer value
@@ -402,7 +541,8 @@ int sfs_fseek(int fileID, int loc) {
  * i-Node and releases the data blocks used by the file (i.e., the data blocks
  * are added to the free block list/map), so that they can be used by new files
  * in the future.*/
-int sfs_remove() {}
+
+// int sfs_remove() {}
 
 // the following is for testing and usage of the functions
 
