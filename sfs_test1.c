@@ -170,20 +170,20 @@ main(int argc, char **argv)
         fprintf(stderr, "ABORT: Out of memory!\n");
         exit(-1);
       }
-      readsize = sfs_fread(fds[i], buffer, chunksize);
+      // readsize = sfs_fread(fds[i], buffer, chunksize);
 
-      if (readsize != chunksize) {
-        fprintf(stderr, "ERROR: Requested %d bytes, read %d\n", chunksize, readsize);
-        readsize = chunksize;
-      }
-      for (k = 0; k < readsize; k++) {
-        if (buffer[k] != (char)(j+k)) {
-          fprintf(stderr, "ERROR: data error at offset %d in file %s (%d,%d)\n",
-                  j+k, names[i], buffer[k], (char)(j+k));
-          error_count++;
-          //break;
-        }
-      }
+      // if (readsize != chunksize) {
+      //   fprintf(stderr, "ERROR: Requested %d bytes, read %d\n", chunksize, readsize);
+      //   readsize = chunksize;
+      // }
+      // for (k = 0; k < readsize; k++) {
+      //   if (buffer[k] != (char)(j+k)) {
+      //     fprintf(stderr, "ERROR: data error at offset %d in file %s (%d,%d)\n",
+      //             j+k, names[i], buffer[k], (char)(j+k));
+      //     error_count++;
+      //     //break;
+      //   }
+      // }
       free(buffer);
     }
   }

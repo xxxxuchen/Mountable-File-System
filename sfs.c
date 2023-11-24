@@ -56,6 +56,8 @@ Inode inode_table[MAX_FILE_NO] = {0};
 int FBM[MAX_BLOCK] = {0};
 DirectoryEntry root_dir[MAX_FILE_NO] = {0};
 
+int min(int x, int y) { return x < y ? x : y; }
+
 int allocate_free_block() {
   for (int i = 0; i < MAX_BLOCK; i++) {
     if (FBM[i] == 0) {
@@ -311,7 +313,6 @@ int sfs_fclose(int fileID) {
   // set the file descriptor table entry
   FDT[fileID].inode_num = -1;
   FDT[fileID].offset = 0;
-  // return 0 on success
   return 0;
 }
 
@@ -356,13 +357,20 @@ int sfs_fwrite(int fileID, char *buf, int length) {
       }
 
       // Calculate the amount of data to write in the current block
-      int write_size = (remaining_space_in_block < length - bytes_written)
-                           ? remaining_space_in_block
-                           : length - bytes_written;
+      int write_size = min(remaining_space_in_block, length - bytes_written);
 
-      // Write data to the current block
-      write_blocks(file_inode.direct[current_block], 1,
-                   current_buffer + bytes_written);
+      if (bytes_written == 0 && write_size <= remaining_space_in_block) {
+        // fill the remaining space in current block
+        char write_buffer[BLOCK_SIZE];
+        fill_last_block(file_inode.direct[current_block], write_buffer,
+                        offset_within_block, write_size, current_buffer);
+        write_blocks(file_inode.direct[current_block], 1, write_buffer);
+      } else {
+        // write the data to the current block
+        char write_buffer[BLOCK_SIZE];
+        memcpy(write_buffer, current_buffer, write_size);
+        write_blocks(file_inode.direct[current_block], 1, write_buffer);
+      }
 
       // Update file pointer and counters
       FDT[fileID].offset += write_size;
@@ -370,13 +378,16 @@ int sfs_fwrite(int fileID, char *buf, int length) {
       current_block++;
       remaining_space_in_block = BLOCK_SIZE;
       current_buffer += write_size;
+      // need to update the offset because we may fill the remaining space in
+      // the indirect block later
+      offset_within_block = FDT[fileID].offset % BLOCK_SIZE;
     } else {
       // If the current block is in the indirect block
       if (file_inode.indirect == -1) {
         // If the indirect block is not allocated, allocate a new block
         file_inode.indirect = allocate_free_block();
         if (file_inode.indirect == -1) {
-          // Failed to allocate a new block
+          printf("error for index block allocation\n");
           return bytes_written;
         }
 
@@ -385,36 +396,41 @@ int sfs_fwrite(int fileID, char *buf, int length) {
         for (int i = 0; i < BLOCK_SIZE / sizeof(int); i++) {
           indirect_block_buffer[i] = -1;
         }
-
         // Write the initialized indirect block to disk
         write_blocks(file_inode.indirect, 1, (char *)&indirect_block_buffer);
       }
 
       // Read the indirect block into memory
-      int indirect_block_buffer[BLOCK_SIZE / sizeof(int)];
-      read_blocks(file_inode.indirect, 1, (char *)&indirect_block_buffer);
+      int index_block[BLOCK_SIZE / sizeof(int)];
+      read_blocks(file_inode.indirect, 1, (char *)&index_block);
 
-      // If the current block in the indirect block is not allocated, allocate a
+      // If the current block in the index block is not allocated, allocate a
       // new block
-      if (indirect_block_buffer[current_block - 12] == -1) {
-        indirect_block_buffer[current_block - 12] = allocate_free_block();
-        if (indirect_block_buffer[current_block - 12] == -1) {
-          printf("error for indirect block allocation\n");
+      if (index_block[current_block - 12] == -1) {
+        index_block[current_block - 12] = allocate_free_block();
+        if (index_block[current_block - 12] == -1) {
+          printf("error for indirect data block allocation\n");
           return bytes_written;
         }
-
-        // Write the updated indirect block to disk
-        write_blocks(file_inode.indirect, 1, (char *)&indirect_block_buffer);
+        // Write the updated index block to disk
+        write_blocks(file_inode.indirect, 1, (char *)&index_block);
       }
 
       // Calculate the amount of data to write in the current block
-      int write_size = (remaining_space_in_block < length - bytes_written)
-                           ? remaining_space_in_block
-                           : length - bytes_written;
+      int write_size = min(remaining_space_in_block, length - bytes_written);
 
-      // Write data to the current block in the indirect block
-      write_blocks(indirect_block_buffer[current_block - 12], 1,
-                   current_buffer + bytes_written);
+      if (bytes_written == 0 && write_size <= remaining_space_in_block) {
+        // fill the remaining space in current block
+        char write_buffer[BLOCK_SIZE];
+        fill_last_block(index_block[current_block - 12], write_buffer,
+                        offset_within_block, write_size, current_buffer);
+        write_blocks(index_block[current_block - 12], 1, write_buffer);
+      } else {
+        // write the data to the current block
+        char write_buffer[BLOCK_SIZE];
+        memcpy(write_buffer, current_buffer, write_size);
+        write_blocks(index_block[current_block - 12], 1, write_buffer);
+      }
 
       // Update file pointer and counters
       FDT[fileID].offset += write_size;
@@ -455,6 +471,8 @@ int sfs_fread(int fileID, char *buf, int length) {
   int current_block = FDT[fileID].offset / BLOCK_SIZE;
   int offset_within_block = FDT[fileID].offset % BLOCK_SIZE;
 
+  int following_bytes = BLOCK_SIZE - offset_within_block;
+
   // Initialize variables to keep track of the bytes read and the buffer pointer
   int bytes_read = 0;
   char *current_buffer = buf;
@@ -468,10 +486,9 @@ int sfs_fread(int fileID, char *buf, int length) {
       }
 
       // Calculate the amount of data to read from the current block
-      int read_size =
-          (file_inode.size - FDT[fileID].offset < length - bytes_read)
-              ? file_inode.size - FDT[fileID].offset
-              : length - bytes_read;
+      int read_size = min(following_bytes, length - bytes_read);
+
+      // TODO: --------------------------------------
 
       // Read data from the current block
       read_blocks(file_inode.direct[current_block], 1,
