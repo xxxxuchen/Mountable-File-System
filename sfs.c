@@ -1,9 +1,9 @@
 /**
  * Author: Xu Chen
- * File System Implementation
- * root directory starts at the first block of the data block region
- * the inode table, root directory and free byte map are brought into memory
- * when first initialized
+ * Mountable File System
+ * Root directory starts at the first block of the data block region.
+ * The inode table, root directory and free byte map are brought into memory
+ * when non fresh disk first initialized.
  */
 #include <signal.h>
 #include <stdbool.h>
@@ -316,12 +316,6 @@ int sfs_fclose(int fileID) {
   return 0;
 }
 
-/*The sfs_fwrite() writes the given number of bytes of data in buf into the open
- * file, starting from the current file pointer. This in effect could increase
- * the size of the file by at most the given number of bytes (it may not
- * increase the file size by the number of bytes written if the write pointer is
- * located at a location other than the end of the file). The sfs_fwrite()
- * should return the number of bytes written.*/
 int sfs_fwrite(int fileID, char *buf, int length) {
   // check if the file descriptor table entry is in use
   if (FDT[fileID].inode_num == -1) {
@@ -488,48 +482,62 @@ int sfs_fread(int fileID, char *buf, int length) {
       // Calculate the amount of data to read from the current block
       int read_size = min(following_bytes, length - bytes_read);
 
-      // TODO: --------------------------------------
-
-      // Read data from the current block
-      read_blocks(file_inode.direct[current_block], 1,
-                  current_buffer + bytes_read);
+      if (bytes_read == 0 && read_size <= following_bytes) {
+        // read the remaining bytes in the current block
+        char read_buffer[BLOCK_SIZE];
+        read_blocks(file_inode.direct[current_block], 1, read_buffer);
+        memcpy(current_buffer, read_buffer + offset_within_block, read_size);
+      } else {
+        // read the data from the current block
+        char read_buffer[BLOCK_SIZE];
+        read_blocks(file_inode.direct[current_block], 1, read_buffer);
+        memcpy(current_buffer, read_buffer, read_size);
+      }
 
       // Update file pointer and counters
       FDT[fileID].offset += read_size;
       bytes_read += read_size;
       current_block++;
       current_buffer += read_size;
+      following_bytes = BLOCK_SIZE;
+      offset_within_block = FDT[fileID].offset % BLOCK_SIZE;
     } else {
       // If the current block is in the indirect block
       if (file_inode.indirect == -1) {
         break;  // reached end of file
       }
 
-      // Read the indirect block into memory
-      int indirect_block_buffer[BLOCK_SIZE / sizeof(int)];
-      read_blocks(file_inode.indirect, 1, (char *)&indirect_block_buffer);
+      // Read the index block into memory
+      int index_block[BLOCK_SIZE / sizeof(int)];
+      read_blocks(file_inode.indirect, 1, (char *)&index_block);
 
-      // If the current block in the indirect block is not allocated, break
+      // If the current block in the index block is not allocated, break
       // (reached end of file)
-      if (indirect_block_buffer[current_block - 12] == -1) {
+      if (index_block[current_block - 12] == -1) {
         break;
       }
 
       // Calculate the amount of data to read from the current block
-      int read_size =
-          (file_inode.size - FDT[fileID].offset < length - bytes_read)
-              ? file_inode.size - FDT[fileID].offset
-              : length - bytes_read;
+      int read_size = min(following_bytes, length - bytes_read);
 
-      // Read data from the current block in the indirect block
-      read_blocks(indirect_block_buffer[current_block - 12], 1,
-                  current_buffer + bytes_read);
+      if (bytes_read == 0 && read_size <= following_bytes) {
+        // read the remaining bytes in the current block
+        char read_buffer[BLOCK_SIZE];
+        read_blocks(index_block[current_block - 12], 1, read_buffer);
+        memcpy(current_buffer, read_buffer + offset_within_block, read_size);
+      } else {
+        // read the data from the current block
+        char read_buffer[BLOCK_SIZE];
+        read_blocks(index_block[current_block - 12], 1, read_buffer);
+        memcpy(current_buffer, read_buffer, read_size);
+      }
 
       // Update file pointer and counters
       FDT[fileID].offset += read_size;
       bytes_read += read_size;
       current_block++;
       current_buffer += read_size;
+      following_bytes = BLOCK_SIZE;
     }
   }
 
@@ -558,7 +566,6 @@ int sfs_fseek(int fileID, int loc) {
  * i-Node and releases the data blocks used by the file (i.e., the data blocks
  * are added to the free block list/map), so that they can be used by new files
  * in the future.*/
-
 // int sfs_remove() {}
 
 // the following is for testing and usage of the functions
