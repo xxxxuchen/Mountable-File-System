@@ -12,7 +12,7 @@
  * upper-case letters and periods ('.') characters. Feel free to
  * change this if your implementation differs.
  */
-#define MAX_FNAME_LENGTH 31   /* Assume at most 20 characters (16.3) */
+#define MAX_FNAME_LENGTH 16   /* Assume at most 20 characters (16.3) */
 
 /* The maximum number of files to attempt to open or create.  NOTE: we
  * do not _require_ that you support this many files. This is just to
@@ -376,7 +376,7 @@ main(int argc, char **argv)
   }
 
   printf("Directory listing\n");
-  char *filename = (char *)malloc(MAXFILENAME);
+  char *filename = (char *)malloc(MAX_FNAME_LENGTH);
   int max = 0;
   while (sfs_getnextfilename(filename)) {
 	  if (strcmp(filename, names[max]) != 0) {
