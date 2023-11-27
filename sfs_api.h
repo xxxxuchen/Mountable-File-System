@@ -2,6 +2,7 @@
 #define SFS_API_H
 
 // You can add more into this file.
+#define MAXFILENAME 16
 
 void mksfs(int);
 
