@@ -61,7 +61,7 @@ int next_file_index = 0;  // for sfs_getnextfilename
 
 int min(int x, int y) { return x < y ? x : y; }
 
-// find the free block in FBM and set it to 1
+// find the free block in FBM and allocate
 int allocate_free_block() {
   for (int i = 0; i < MAX_BLOCK; i++) {
     if (FBM[i] == 0) {
@@ -89,7 +89,7 @@ void fill_last_block(int block_num, char *write_buffer, int offset,
   free(buffer);
 }
 
-// for debugging purpose
+// for debugging 
 void printRootDir() {
   printf("Root directory:\n");
   for (int i = 0; i < MAX_FILE_NO; i++) {
@@ -328,7 +328,7 @@ int sfs_fwrite(int fileID, char *buf, int length) {
   int file_inode_num = FDT[fileID].inode_num;
   Inode file_inode = inode_table[file_inode_num];
 
-  // Calculate the current block and offset within the block
+  // calculate the current block and offset within the block
   int current_block = FDT[fileID].offset / BLOCK_SIZE;
   int offset_within_block = FDT[fileID].offset % BLOCK_SIZE;
 
