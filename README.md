@@ -9,6 +9,7 @@ The overall on disk structure follows the typical linux file system design with 
 - 1 block is allocated for super block.
 - 6 block are allocated for inode table.
 - Among the total 4096 blocks, 1 + 4 + 6 = 11 blocks are used for metadata, so the total number of data blocks is 4096 - 11 = 4085 blocks.
+- A single inode is 56 bytes. The maximum number of inodes in the file system is thus 6 * 1024 / 56, which equals 109. Since 1 inode is for root directory, the maximum files (empty) that can be created is 108.
 - The inode contains 12 direct block pointers, and only 1 indirect block pointer, which points to 1024 / 4 = 256 blocks. So, the max file size of a single file is (12 + 256) * 1024 = 274432 bytes = 256 KB.
 - see source code sfs.c for more details.
 
